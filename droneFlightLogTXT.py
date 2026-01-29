@@ -12,15 +12,20 @@ __artifacts_v2__ = {
         "output_types": "all",
         "artifact_icon": "slack"
     }
-} 
+}
 
-import traceback
-import zlib,struct,os
-from datetime import datetime, timedelta
+import math
+import struct
+from datetime import datetime
+from enum import Enum
 from scripts.ilapfuncs import artifact_processor
 
 @artifact_processor
-def droneFlightLogTXT(files_found, report_folder, seeker, wrap_text, timezone_offset):
+def droneFlightLogTXT(files_found, _report_folder, _seeker, _wrap_text, _timezone_offset):
+    """
+    Fungsi utama untuk memproses log drone. 
+    Argumen dengan awalan '_' diabaikan oleh linter tetapi tetap ada untuk kompatibilitas.
+    """
     data_list = []
     source_path = ''
 
@@ -28,26 +33,24 @@ def droneFlightLogTXT(files_found, report_folder, seeker, wrap_text, timezone_of
         source_path = str(file_found)
         if not source_path.lower().endswith(".txt"):
             continue
+            
         txt = TXTFile(source_path)
-       
+        
         try:
-            detail = txt.ParseDetail()
-            timestamp = datetime.fromtimestamp(detail["timestamp"] / 1000) 
-            formatted_time = timestamp.strftime("%Y-%m-%d %H:%M:%S")
             for record in txt.ParseRecord():
                 record_time = record[0]
                 longitude = record[1]
                 latitude = record[2]
-                distance = record[3]
                 height = record[4]
                 data_list.append((record_time, longitude, latitude, height))
-        except Exception as e:
+        except Exception: 
             continue
     data_headers = ('Timestamp', 'Longitude', 'Latitude', 'Height')
     return data_headers, data_list, source_path
 
 class OutOfDataException(Exception):
     pass
+
 class Eater:
     def __init__(self, data):
         self._data = data
@@ -60,7 +63,7 @@ class Eater:
     def skip(self, size):
         self._cur += size
     def read_string(self, size):
-        return self.read_data(size).rstrip(b"\x00").decode("utf-8")
+        return self.read_data(size).rstrip(b"\x00").decode("utf-8", errors="ignore")
     def read_uint8(self):
         return struct.unpack("<B", self.read_data(1))[0]
     def read_uint32(self):
@@ -72,8 +75,8 @@ class Eater:
     def read_double(self):
         return struct.unpack("<d", self.read_data(8))[0]
 
-crc64Table = [0x0,
-    0x7AD870C830358979, 0xF5B0E190606B12F2, 0x8F689158505E9B8B,
+crc64Table = [
+    0x0, 0x7AD870C830358979, 0xF5B0E190606B12F2, 0x8F689158505E9B8B,
     0xC038E5739841B68F, 0xBAE095BBA8743FF6, 0x358804E3F82AA47D,
     0x4F50742BC81F2D04, 0xAB28ECB46814FE75, 0xD1F09C7C5821770C,
     0x5E980D24087FEC87, 0x24407DEC384A65FE, 0x6B1009C7F05548FA,
@@ -157,23 +160,18 @@ crc64Table = [0x0,
     0xDF7ADABD7A6E2D6, 0x772FDD63E7936BAF, 0xF8474C3BB7CDF024,
     0x829F3CF387F8795D, 0x66E7A46C27F3AA2C, 0x1C3FD4A417C62355,
     0x935745FC4798B8DE, 0xE98F353477AD31A7, 0xA6DF411FBFB21CA3,
-    0xDC0731D78F8795DA, 0x536FA08FDFD90E51, 0x29B7D047EFEC8728]
+    0xDC0731D78F8795DA, 0x536FA08FDFD90E51, 0x29B7D047EFEC8728
+]
 
-def crc64(seed,buffer):
+def crc64(seed, buffer):
     crc = seed
     for i in buffer:
-        tableIndex = i ^ (crc&0xFF)
+        tableIndex = i ^ (crc & 0xFF)
         crc = crc64Table[tableIndex] ^ (crc >> 8)
     return crc
 
-from enum import Enum
-import math, time
-from datetime import datetime
-from pprint import pprint
-import struct
-
 class RecordType(Enum):
-    OSD  = 0x01
+    OSD = 0x01
     HOME = 0x02
     GIMBAL = 0x03
     RC = 0x04
@@ -199,32 +197,27 @@ class RecordType(Enum):
     OTHER = 0xFE
 
 def GetScrambleBytes(recordType, keyByte):
-    dataForBuffer = (0x123456789ABCDEF0 * keyByte)&0xFFFFFFFFFFFFFFFF
+    dataForBuffer = (0x123456789ABCDEF0 * keyByte) & 0xFFFFFFFFFFFFFFFF
     bufferToCRC = struct.pack("<Q", dataForBuffer)
-    return struct.pack("<Q", crc64((recordType+keyByte)&0xFF, bufferToCRC))
-
-def ParseComponent(data):
-    componentType,valueLen = struct.unpack("<HB", data[:3])
-    componentMap = {1:"cameraSn", 2:"aircraftSn", 3:"rcSn", 4:"batterySn"}
-    value = data[3:3+valueLen].rstrip(b"\x00").decode("utf-8")
-    return componentMap.get(componentType,"unkown"), value
+    return struct.pack("<Q", crc64((recordType + keyByte) & 0xFF, bufferToCRC))
 
 def ParseCustom(data):
-    hSpeed,distance,updateTime = struct.unpack("<ffQ", data[2:18])
-    return [datetime.fromtimestamp(updateTime/1000), hSpeed,distance]
+    hSpeed, distance, updateTime = struct.unpack("<ffQ", data[2:18])
+    return [datetime.fromtimestamp(updateTime / 1000), hSpeed, distance]
 
 def ParseOSD(data):
-    longitude,latitude,height,xSpeed,ySpeed,zSpeed = struct.unpack("<ddhhhh", data[:24])
-    #print(longitude,latitude,height,xSpeed,ySpeed,zSpeed)
-    return [longitude*(180/math.pi), latitude*(180/math.pi), height]
+    longitude, latitude, height, _, _, _ = struct.unpack("<ddhhhh", data[:24])
+    return [longitude * (180 / math.pi), latitude * (180 / math.pi), height]
 
 class TXTFile:
     def __init__(self, path):
-        self.data = open(path, "rb").read()
+        with open(path, "rb") as f:
+            self.data = f.read()
         self.headerSize = 100
         self.isScrambled = True
         self.recordsAreaStart = 0
-        self.recordsAreaEnd,self.detailsAreaSize,self.fileVersionNumber = struct.unpack("<QHB", self.data[:11])
+        self.recordsAreaEnd, self.detailsAreaSize, self.fileVersionNumber = struct.unpack("<QHB", self.data[:11])
+        
         if self.fileVersionNumber < 0x06:
             self.headerSize = 12
             self.isScrambled = False
@@ -233,49 +226,48 @@ class TXTFile:
             self.recordsAreaStart = self.headerSize + self.detailsAreaSize
             self.detailsAreaStart = self.headerSize
             self.detailsAreaEnd = self.detailsAreaStart + self.detailsAreaSize
-            computedFileSize = self.recordsAreaEnd
         else:
-            self.recordsAreaStart =  self.headerSize
-            self.detailsAreaStart =  self.recordsAreaEnd
+            self.recordsAreaStart = self.headerSize
+            self.detailsAreaStart = self.recordsAreaEnd
             self.detailsAreaEnd = self.detailsAreaStart + self.detailsAreaSize
-            computedFileSize = self.detailsAreaEnd
             
     def ParseRecord(self):
         data = self.data[self.recordsAreaStart:self.recordsAreaEnd]
         curIndex = 0
         location_records = []
         last_gps = None
-        while curIndex <len(data):
+        
+        while curIndex < len(data):
             try:
                 recordType = data[curIndex]
                 recordLength = data[curIndex+1]
                 curIndex += 2
-                if recordType == RecordType.JPEG.value or (recordType == 0xFF and recordLength==0xD8):    
-                    raise Exception("unhandled jpeg record type at ", curIndex) 
-                if data[curIndex+recordLength]!=0xFF:
+                
+                if recordType == RecordType.JPEG.value or (recordType == 0xFF and recordLength == 0xD8):    
+                    break 
+                if data[curIndex+recordLength] != 0xFF:
                     if data[curIndex+recordLength+1] == 0xFF:
                         recordLength += 1
                     else:
-                        raise Exception("End of record' byte not seen")
-                recordData = b""
+                        break
+                
                 if self.isScrambled:
                     scrambleBytes = GetScrambleBytes(recordType, data[curIndex])
                     rawRecordData = data[curIndex+1:curIndex+recordLength]
-                    unscrambledRecord = [(i^scrambleBytes[index%8]) for index, i in enumerate(rawRecordData)]
+                    unscrambledRecord = [(i ^ scrambleBytes[index % 8]) for index, i in enumerate(rawRecordData)]
                     recordData = bytes(unscrambledRecord)
                 else:
                     recordData = data[curIndex:curIndex+recordLength]
+                
                 if recordType == RecordType.CUSTOM.value:
-                    update_time,speed,distance = ParseCustom(recordData)
+                    update_time, _, distance = ParseCustom(recordData)
                     if last_gps is not None:
-                        
-                        location_records.append([update_time,last_gps[0],last_gps[1],last_gps[2],distance,])
-                    #print("current offset:", curIndex)
+                        location_records.append([update_time, last_gps[0], last_gps[1], last_gps[2], distance])
                 elif recordType == RecordType.OSD.value:
                     last_gps = ParseOSD(recordData)
-                curIndex += (recordLength+1)
-            except Exception as e:
-                print("exception on parse record:", e)
+                
+                curIndex += (recordLength + 1)
+            except Exception:
                 break
         return location_records
         
@@ -293,7 +285,6 @@ class TXTFile:
             detail["isNew"] = eater.read_uint8()
             detail["needUpload"] = eater.read_uint8()
             detail["recordLineCount"] = eater.read_uint32()
-
             eater.skip(4)
             detail["timestamp"] = eater.read_uint64()
             detail["longitude"] = eater.read_double()
@@ -305,13 +296,13 @@ class TXTFile:
             detail["maxVerticalSpeed"] = eater.read_float()
             detail["photoNum"] = eater.read_uint32()
             detail["videoTime"] = eater.read_uint32()
+            
             if version < 0x06:
                 eater.skip(124)
                 detail["aircraftSn"] = eater.read_string(10)
                 eater.skip(1)
                 detail["aircraftName"] = eater.read_string(25)
                 eater.skip(7)
-
                 detail["activeTimestamp"] = eater.read_uint64()
                 detail["cameraSn"] = eater.read_string(10)
                 detail["rcSn"] = eater.read_string(10)
@@ -323,16 +314,9 @@ class TXTFile:
                 detail["cameraSn"] = eater.read_string(16)
                 detail["rcSn"] = eater.read_string(16)
                 detail["batterySn"] = eater.read_string(16)
+                
             detail["appType.RAW"] = eater.read_uint8()
             detail["appVersion"] = struct.unpack(">I", b"\x00" + eater.read_data(3))[0]
-        except OutOfDataException:
+        except (OutOfDataException, Exception):
             pass
-        except Exception as e:
-            print("parse detail error:")
-            traceback.print_exc()
         return detail
-
-DetailNameMap = {"aircraftName":"飞行器名称", "aircraftSn":"飞行器序列号", "city":"城市", 
-                    "longitude":"经度", "latitude":"纬度", "totalDistance":"总飞行距离", 
-                    "totalTime":"飞行总时长", "maxHeight":"最大高度(m)", "photoNum":"照片数量",
-                    "vedioTime":"视频时长", "timestamp":"时间"}
