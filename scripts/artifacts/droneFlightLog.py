@@ -20,7 +20,7 @@ import datetime
 from scripts.ilapfuncs import artifact_processor, logfunc
 
 @artifact_processor
-def droneFlightLog(files_found, report_folder, seeker, wrap_text, timezone_offset):
+def droneFlightLog(files_found, _report_folder, _seeker, _wrap_text, _timezone_offset):
     data_list = []
     source_paths = set()
 
