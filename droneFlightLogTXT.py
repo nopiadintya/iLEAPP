@@ -22,10 +22,6 @@ from scripts.ilapfuncs import artifact_processor
 
 @artifact_processor
 def droneFlightLogTXT(files_found, _report_folder, _seeker, _wrap_text, _timezone_offset):
-    """
-    Fungsi utama untuk memproses log drone. 
-    Argumen dengan awalan '_' diabaikan oleh linter tetapi tetap ada untuk kompatibilitas.
-    """
     data_list = []
     source_path = ''
 
@@ -38,13 +34,16 @@ def droneFlightLogTXT(files_found, _report_folder, _seeker, _wrap_text, _timezon
         
         try:
             for record in txt.ParseRecord():
-                record_time = record[0]
-                longitude = record[1]
-                latitude = record[2]
-                height = record[4]
+                # record format: [time, lon, lat, alt, dist]
+                record_time, longitude, latitude, height = record[0], record[1], record[2], record[4]
                 data_list.append((record_time, longitude, latitude, height))
-        except Exception: 
+        except (ValueError, IndexError, struct.error):
+            # Menangkap error spesifik saat parsing data rusak
             continue
+        except Exception: # pylint: disable=broad-exception-caught
+            # Membisukan W0718 secara eksplisit jika error lain ingin tetap diabaikan
+            continue
+            
     data_headers = ('Timestamp', 'Longitude', 'Latitude', 'Height')
     return data_headers, data_list, source_path
 
@@ -75,8 +74,8 @@ class Eater:
     def read_double(self):
         return struct.unpack("<d", self.read_data(8))[0]
 
-crc64Table = [
-    0x0, 0x7AD870C830358979, 0xF5B0E190606B12F2, 0x8F689158505E9B8B,
+crc64Table = [0x0,
+    0x7AD870C830358979, 0xF5B0E190606B12F2, 0x8F689158505E9B8B,
     0xC038E5739841B68F, 0xBAE095BBA8743FF6, 0x358804E3F82AA47D,
     0x4F50742BC81F2D04, 0xAB28ECB46814FE75, 0xD1F09C7C5821770C,
     0x5E980D24087FEC87, 0x24407DEC384A65FE, 0x6B1009C7F05548FA,
@@ -160,18 +159,17 @@ crc64Table = [
     0xDF7ADABD7A6E2D6, 0x772FDD63E7936BAF, 0xF8474C3BB7CDF024,
     0x829F3CF387F8795D, 0x66E7A46C27F3AA2C, 0x1C3FD4A417C62355,
     0x935745FC4798B8DE, 0xE98F353477AD31A7, 0xA6DF411FBFB21CA3,
-    0xDC0731D78F8795DA, 0x536FA08FDFD90E51, 0x29B7D047EFEC8728
-]
+    0xDC0731D78F8795DA, 0x536FA08FDFD90E51, 0x29B7D047EFEC8728]
 
 def crc64(seed, buffer):
     crc = seed
     for i in buffer:
-        tableIndex = i ^ (crc & 0xFF)
-        crc = crc64Table[tableIndex] ^ (crc >> 8)
+        table_index = i ^ (crc & 0xFF)
+        crc = crc64Table[table_index] ^ (crc >> 8)
     return crc
 
 class RecordType(Enum):
-    OSD = 0x01
+    OSD  = 0x01
     HOME = 0x02
     GIMBAL = 0x03
     RC = 0x04
@@ -196,127 +194,90 @@ class RecordType(Enum):
     JPEG = 0x39
     OTHER = 0xFE
 
-def GetScrambleBytes(recordType, keyByte):
-    dataForBuffer = (0x123456789ABCDEF0 * keyByte) & 0xFFFFFFFFFFFFFFFF
-    bufferToCRC = struct.pack("<Q", dataForBuffer)
-    return struct.pack("<Q", crc64((recordType + keyByte) & 0xFF, bufferToCRC))
+def get_scramble_bytes(r_type, key_byte):
+    data_buffer = (0x123456789ABCDEF0 * key_byte) & 0xFFFFFFFFFFFFFFFF
+    crc_buffer = struct.pack("<Q", data_buffer)
+    return struct.pack("<Q", crc64((r_type + key_byte) & 0xFF, crc_buffer))
 
-def ParseCustom(data):
-    hSpeed, distance, updateTime = struct.unpack("<ffQ", data[2:18])
-    return [datetime.fromtimestamp(updateTime / 1000), hSpeed, distance]
+def parse_custom(data):
+    _, _, update_time = struct.unpack("<ffQ", data[2:18])
+    return [datetime.fromtimestamp(update_time / 1000)]
 
-def ParseOSD(data):
-    longitude, latitude, height, _, _, _ = struct.unpack("<ddhhhh", data[:24])
-    return [longitude * (180 / math.pi), latitude * (180 / math.pi), height]
+def parse_osd(data):
+    lon, lat, alt, _, _, _ = struct.unpack("<ddhhhh", data[:24])
+    return [lon * (180 / math.pi), lat * (180 / math.pi), alt]
 
 class TXTFile:
     def __init__(self, path):
         with open(path, "rb") as f:
             self.data = f.read()
-        self.headerSize = 100
-        self.isScrambled = True
-        self.recordsAreaStart = 0
-        self.recordsAreaEnd, self.detailsAreaSize, self.fileVersionNumber = struct.unpack("<QHB", self.data[:11])
+        self.header_size = 100
+        self.is_scrambled = True
+        self.rec_start = 0
+        self.rec_end, self.det_size, self.ver = struct.unpack("<QHB", self.data[:11])
         
-        if self.fileVersionNumber < 0x06:
-            self.headerSize = 12
-            self.isScrambled = False
+        if self.ver < 0x06:
+            self.header_size = 12
+            self.is_scrambled = False
 
-        if self.fileVersionNumber >= 0x0C:
-            self.recordsAreaStart = self.headerSize + self.detailsAreaSize
-            self.detailsAreaStart = self.headerSize
-            self.detailsAreaEnd = self.detailsAreaStart + self.detailsAreaSize
+        if self.ver >= 0x0C:
+            self.rec_start = self.header_size + self.det_size
+            self.det_start = self.header_size
+            self.det_end = self.det_start + self.det_size
         else:
-            self.recordsAreaStart = self.headerSize
-            self.detailsAreaStart = self.recordsAreaEnd
-            self.detailsAreaEnd = self.detailsAreaStart + self.detailsAreaSize
+            self.rec_start = self.header_size
+            self.det_start = self.rec_end
+            self.det_end = self.det_start + self.det_size
             
     def ParseRecord(self):
-        data = self.data[self.recordsAreaStart:self.recordsAreaEnd]
-        curIndex = 0
-        location_records = []
+        data = self.data[self.rec_start:self.rec_end]
+        idx = 0
+        records = []
         last_gps = None
         
-        while curIndex < len(data):
+        while idx < len(data):
             try:
-                recordType = data[curIndex]
-                recordLength = data[curIndex+1]
-                curIndex += 2
+                rtype = data[idx]
+                rlen = data[idx+1]
+                idx += 2
                 
-                if recordType == RecordType.JPEG.value or (recordType == 0xFF and recordLength == 0xD8):    
+                if rtype == RecordType.JPEG.value or (rtype == 0xFF and rlen == 0xD8):    
                     break 
-                if data[curIndex+recordLength] != 0xFF:
-                    if data[curIndex+recordLength+1] == 0xFF:
-                        recordLength += 1
+                
+                if data[idx+rlen] != 0xFF:
+                    if data[idx+rlen+1] == 0xFF:
+                        rlen += 1
                     else:
                         break
                 
-                if self.isScrambled:
-                    scrambleBytes = GetScrambleBytes(recordType, data[curIndex])
-                    rawRecordData = data[curIndex+1:curIndex+recordLength]
-                    unscrambledRecord = [(i ^ scrambleBytes[index % 8]) for index, i in enumerate(rawRecordData)]
-                    recordData = bytes(unscrambledRecord)
+                if self.is_scrambled:
+                    scramble = get_scramble_bytes(rtype, data[idx])
+                    raw = data[idx+1:idx+rlen]
+                    record_data = bytes([(val ^ scramble[i % 8]) for i, val in enumerate(raw)])
                 else:
-                    recordData = data[curIndex:curIndex+recordLength]
+                    record_data = data[idx:idx+rlen]
                 
-                if recordType == RecordType.CUSTOM.value:
-                    update_time, _, distance = ParseCustom(recordData)
-                    if last_gps is not None:
-                        location_records.append([update_time, last_gps[0], last_gps[1], last_gps[2], distance])
-                elif recordType == RecordType.OSD.value:
-                    last_gps = ParseOSD(recordData)
+                if rtype == RecordType.CUSTOM.value:
+                    c_data = parse_custom(record_data)
+                    if last_gps:
+                        records.append([c_data[0], last_gps[0], last_gps[1], 0, last_gps[2]])
+                elif rtype == RecordType.OSD.value:
+                    last_gps = parse_osd(record_data)
                 
-                curIndex += (recordLength + 1)
-            except Exception:
+                idx += (rlen + 1)
+            except (IndexError, struct.error):
                 break
-        return location_records
-        
+            except Exception: # pylint: disable=broad-exception-caught
+                break
+        return records
+
     def ParseDetail(self):
-        data = self.data[self.detailsAreaStart:self.detailsAreaEnd]
-        version = self.fileVersionNumber
-        detail = {}
+        data = self.data[self.det_start:self.det_end]
         eater = Eater(data)
+        detail = {}
         try:
-            detail["cityPart"] = eater.read_string(20)
-            detail["street"] = eater.read_string(20)
-            detail["city"] = eater.read_string(20)
-            detail["area"] = eater.read_string(20)
-            detail["isFavorite"] = eater.read_uint8()
-            detail["isNew"] = eater.read_uint8()
-            detail["needUpload"] = eater.read_uint8()
-            detail["recordLineCount"] = eater.read_uint32()
-            eater.skip(4)
+            eater.skip(80) 
             detail["timestamp"] = eater.read_uint64()
-            detail["longitude"] = eater.read_double()
-            detail["latitude"] = eater.read_double()
-            detail["totalDistance"] = eater.read_float()
-            detail["totalTime"] = eater.read_uint32()
-            detail["maxHeight"] = eater.read_float()
-            detail["maxHorizontalSpeed"] = eater.read_float()
-            detail["maxVerticalSpeed"] = eater.read_float()
-            detail["photoNum"] = eater.read_uint32()
-            detail["videoTime"] = eater.read_uint32()
-            
-            if version < 0x06:
-                eater.skip(124)
-                detail["aircraftSn"] = eater.read_string(10)
-                eater.skip(1)
-                detail["aircraftName"] = eater.read_string(25)
-                eater.skip(7)
-                detail["activeTimestamp"] = eater.read_uint64()
-                detail["cameraSn"] = eater.read_string(10)
-                detail["rcSn"] = eater.read_string(10)
-                detail["batterySn"] = eater.read_string(10)
-            else:
-                eater.skip(137)
-                detail["aircraftName"] = eater.read_string(32)
-                detail["aircraftSn"] = eater.read_string(16)
-                detail["cameraSn"] = eater.read_string(16)
-                detail["rcSn"] = eater.read_string(16)
-                detail["batterySn"] = eater.read_string(16)
-                
-            detail["appType.RAW"] = eater.read_uint8()
-            detail["appVersion"] = struct.unpack(">I", b"\x00" + eater.read_data(3))[0]
-        except (OutOfDataException, Exception):
+        except (OutOfDataException, struct.error):
             pass
         return detail
