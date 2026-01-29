@@ -14,13 +14,15 @@ __artifacts_v2__ = {
     }
 } 
 
-import traceback
 from datetime import datetime
 import zlib, struct, os
 from scripts.ilapfuncs import artifact_processor, logfunc
 
 @artifact_processor
 def droneFlightLogDAT(files_found, _report_folder, _seeker, _wrap_text, _timezone_offset):
+    """
+    Parses DJI Drone DAT files to extract GPS coordinates and timestamps.
+    """
     data_list = []
     source_path = ''
 
@@ -175,3 +177,4 @@ def extract_dat(path):
     except (OSError, zlib.error):
         pass
     return out
+
